@@ -1,159 +1,98 @@
 # Lab 21 — Evaluation Report
 
 **Họ tên**: Phạm Thanh Long  **MSSV**: 01259  **Ngày**: 2026-08-21
-**Tier**: `CPU`  **Base model**: `Qwen/Qwen3.5-0.8B`  **GPU thực tế**: `CPU (không GPU)`
+**Tier**: `T4`  **Base model**: `unsloth/Qwen3.5-4B`  **GPU thực tế**: Tesla T4 (14.6 GB)
 
-> Mọi con số dưới đây phải khớp với file trong `results/`. Grader kiểm tra chéo.
-
----
+> Các số liệu được đối chiếu với `results/`.
 
 ## 1. Setup
 
-| | |
+| Hạng mục | Giá trị |
 |---|---|
-| Dataset | 250 ticket CSKH → JSON triage (mặc định) |
-| Train / val | 225 / 25 (seed 42) |
-| `max_length` | 512 — p95 đo được là 98 *(results/token_stats.json)* |
+| Dataset | 250 ticket CSKH → JSON triage |
+| Train / val | 225 / 25, seed 42 |
+| `max_length` | 1024; p95 là 98, gợi ý tối thiểu 256 |
 | `MASK_MODE` | `assistant-only` |
-| Epochs / max_steps | 2 |
+| Epochs / max_steps | 2 / 30 |
 
-**Template có giữ khối ` thinking` không?** `có` — *(results/template_check.json)*
-Template Qwen3.5 giữ nguyên khối suy luận trong `apply_chat_template`. Điều này có nghĩa là nếu dữ liệu huấn luyện chứa reasoning traces, chúng sẽ tới được hàm loss.
-
----
+Template giữ reasoning/thinking khi render (`results/template_check.json`), nên trace trong assistant turn có thể tới loss.
 
 ## 2. Mask proof (NB1)
 
-| | |
+| Chỉ số | Giá trị |
 |---|---|
-| `supervised_fraction` | `0.39` |
+| `supervised_fraction` | 0.4149 |
 | Câu trả lời nằm trong loss | `true` |
 | Câu hỏi KHÔNG nằm trong loss | `true` |
 
-Dán 3–5 dòng đầu của đoạn được tính loss:
+Đầu phần được supervised:
 
-```
- response
+```text
+</think>
 
 {"intent": "doi_tra", "urgency": "trung_binh", "product": "balo laptop", "sentiment": "trung_tinh"}<|im_end|>
 ```
 
----
-
-## 3. Ba baseline (NB2 — đo TRƯỚC khi train)
-
-> ⚠ **Cần GPU để chạy NB2.** Máy hiện tại là CPU-only, nên phần này chưa chạy được.
-> Cần chạy trên Colab Free T4 theo hướng dẫn trong README.md.
+## 3. Ba baseline (NB2)
 
 | Run | target | regression | format | latency (ms) |
-|---|---|---|---|---|
-| (a) base + naive prompt | _chưa đo_ | _chưa đo_ | _chưa đo_ | _chưa đo_ |
-| (b) base + optimized prompt | _chưa đo_ | _chưa đo_ | _chưa đo_ | _chưa đo_ |
-| (c) LoRA fine-tune | _chưa đo_ | _chưa đo_ | _chưa đo_ | _chưa đo_ |
+|---|---:|---:|---:|---:|
+| (a) base + naive prompt | 0.000 | 0.7578 | 0.000 | 3179.8 |
+| (b) base + optimized prompt | 0.765 | 0.7578 | 1.000 | 1008.3 |
+| (c) LoRA fine-tune | 0.975 | 0.5444 | 1.000 | 1408.5 |
 
-**(b) có thật sự mạnh hơn (a) không?** _chưa đo_ — cần chạy NB2 trên GPU.
-Bạn có sửa `OPTIMIZED_PROMPT` không? Không — giữ nguyên prompt mặc định của lab.
-
----
+Baseline (b) mạnh hơn rất rõ (a): target tăng 0.765, format từ 0 lên 1.0 và latency thấp hơn. Tôi không sửa `OPTIMIZED_PROMPT`; SHA `719e74d3b6232053` khớp prompt của lab. Run này dùng đủ 50 target và 15 regression, `eval_limit` là `null`.
 
 ## 4. Giải phẫu cấu hình sai (NB4)
 
-> ⚠ **Cần GPU để chạy NB4.** Phần này chưa chạy được trên máy CPU-only.
+| Run | vị trí | r | trainable | LR | train loss | target | VRAM GB |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `correct` | text-linear | 16 | 32,464,896 | 1e-4 | 0.6250 | **0.975** | 12.01 |
+| `attn_only` | q,v | 283 | 32,456,704 | 1e-4 | **0.5371** | 0.970 | 12.02 |
+| `wrong_lr` | text-linear | 16 | 32,464,896 | 1e-5 | 1.5704 | 0.000 | 12.01 |
+| `qlora` | text-linear | 16 | 32,464,896 | 1e-4 | 0.7058 | 0.940 | **7.09** |
 
-| Run | vị trí | r | trainable | LR | train loss (NB4) | **target (NB5 §4)** | s | VRAM GB |
-|---|---|---|---|---|---|---|---|---|
-| `correct` | text-linear | 16 | | | | | | |
-| `attn_only` | q,v | *(matched)* | | | | | | |
-| `wrong_lr` | text-linear | 16 | | | | | | |
-| `qlora` | text-linear | 16 | | | | | | |
+**4.1.** `attn_only` dùng 32,456,704 tham số, gần bằng `correct` 32,464,896 (chênh khoảng 0.025%). Nó thua nhẹ trên target, 0.970 so với 0.975, dù lại có train loss thấp hơn, 0.5371 so với 0.6250. Thứ tự theo loss vì thế đảo ngược thứ tự theo tác vụ. Rank đã tăng đến 283 để khớp ngân sách nhưng không thay thế được placement text-linear rộng hơn.
 
-> Xếp hạng bằng cột **target**, không bằng cột train loss — chấm bằng chỉ số thay thế
-> chính là Lỗi #3. Nếu hai cột cho hai thứ tự khác nhau, nói thẳng điều đó ở 4.1: đó là
-> kết quả đáng giá nhất bạn đo được trong lab này.
+**4.2.** `wrong_lr` chỉ thay LR từ 1e-4 xuống 1e-5 nhưng final loss tăng lên 1.5704 và target/format rơi về 0.000. Nếu không biết LR, có thể kết luận sai rằng LoRA hoặc dữ liệu không học được. Đây là sai thang learning rate của LoRA, không phải bằng chứng placement sai.
 
-Trả lời ba câu (mỗi câu ≥3 câu văn):
-
-**4.1 — `attn_only` có cùng số tham số huấn luyện với `correct`. Trên tập target nó
-thắng, thua, hay hoà? Thứ tự đó có giống thứ tự theo train loss không? Điều đó nói gì về
-*rank* so với *vị trí gắn adapter*?**
-
-_Chưa trả lời được — cần chạy NB4 và NB5 trên GPU. Dựa trên lý thuyết deck §10.2,
-attention-only placement với rank được nâng lên để khớp ngân sách tham số thường thua
-full placement, vì rank không phải đòn bẩy chính — vị trí gắn adapter mới là yếu tố
-quyết định. Nhưng cần số đo thực tế để xác nhận._
-
-**4.2 — `wrong_lr` chỉ khác đúng một con số. Đường loss khác nhau ra sao? Nếu chỉ nhìn
-loss mà không biết LR, bạn sẽ kết luận sai điều gì?**
-
-_Chưa trả lời được — cần chạy NB4 trên GPU. Theo deck §10.3, LR thang full-FT (1e-5)
-áp cho LoRA sẽ làm loss gần như phẳng từ step 0, vì LoRA cần LR cao hơn ~10x. Nếu chỉ
-nhìn loss mà không biết LR, có thể kết luận nhầm rằng "LoRA không học được" thay vì
-"LR sai thang"._
-
-**4.3 — `qlora` tiết kiệm bao nhiêu VRAM, trả giá bằng gì? Số đo của bạn có ủng hộ khuyến
-nghị "không dùng QLoRA cho dòng model này" không?**
-
-_Chưa trả lời được — cần chạy NB4 trên GPU. Nhà cung cấp (Unsloth) khuyến nghị không
-dùng QLoRA cho Qwen3.5 vì lỗi lượng tử hoá cao hơn bình thường. Cần đo VRAM và chất
-lượng thực tế để xác nhận._
-
----
+**4.3.** QLoRA dùng 7.09 GB so với 12.01 GB, tiết kiệm 4.92 GB, xấp xỉ 41%. Đánh đổi là target giảm 0.975 → 0.940 và latency tăng 1408.5 → 1810.7 ms. T4 vẫn chứa fp16, nên số đo ủng hộ việc không chọn QLoRA mặc định cho model này; chỉ dùng khi VRAM là ràng buộc cứng.
 
 ## 5. Phán quyết (NB5)
 
-> ⚠ **Cần GPU để chạy NB5.** Phần này chưa chạy được trên máy CPU-only.
+**Kết quả cổng hồi quy: FAILED**
+`target Δ = +0.210` · `regression Δ = -0.2133` · `valid_trace_rate = 0.0`
 
-**Kết quả cổng hồi quy**: _chưa chạy_
-`target Δ = _chưa đo_` · `regression Δ = _chưa đo_` · `valid_trace_rate = _chưa đo_`
+Fine-tune vượt baseline prompt tối ưu ở target (0.975 so với 0.765), nhưng regression giảm từ 0.7578 xuống 0.5444. Mức giảm 0.2133 lớn hơn rất nhiều ngưỡng 0.020, vì vậy FAILED là kết luận đúng, không nên nới gate để lấy PASS. Đây là catastrophic forgetting: 225 mẫu triage đã kéo adapter theo miền mới nhưng làm giảm năng lực tổng quát. Tôi không deploy adapter này. Hướng sửa là thêm 1–5% replay data tổng quát, giảm cường độ fine-tune hoặc dừng sớm, rồi chạy lại chính regression gate này.
 
-Diễn giải (≥100 từ). Nếu FAILED: **vì sao**, và điều đó nói gì về bài toán của bạn?
-(Một FAILED được phân tích tốt ăn điểm cao hơn một PASSED không giải thích được.)
+## 6. Định tính — có ca FT thua
 
-_Chưa viết được — cần kết quả từ NB5. Tuy nhiên, dựa trên thiết kế của lab, nếu fine-tune
-không thắng được baseline (b) — prompt đã tối ưu — thì kết luận đúng là "bài toán này
-không cần fine-tune". Đó là một kết quả hợp lệ và được chấm điểm đầy đủ._
+`qualitative.json` lưu score/dự đoán của FT; NB2 không lưu prediction theo từng item của prompt (b), nên bảng không bịa prediction của (b), chỉ dùng target tổng 0.765.
 
----
+| # | Ticket rút gọn | Nhãn đúng | (b) prompt | (c) FT | Nhận xét |
+|---|---|---|---|---:|---|
+| 1 | Chuột không dây, trả lại gấp | `doi_tra`, cao, tích cực | target tổng 0.765 | 1.00 | FT thắng |
+| 2 | Ốp lưng, hoàn tiền sớm | `hoan_tien`, trung bình, tiêu cực | target tổng 0.765 | 1.00 | FT thắng |
+| 3 | Bình giữ nhiệt, chưa thấy tiền | `hoan_tien`, thấp, tích cực | target tổng 0.765 | **0.75** | **FT thua**: sai urgency |
+| 4 | Áo khoác gió bị lỗi, khi nào tiện | `san_pham_loi`, thấp, tích cực | target tổng 0.765 | **0.75** | **FT thua**: sai urgency |
+| 5 | Đèn bàn LED giao chậm, khi nào tiện | `van_chuyen`, thấp, tích cực | target tổng 0.765 | **0.75** | **FT thua**: sai urgency |
 
-## 6. Định tính — bắt buộc có cả ca THUA
-
-> ⚠ **Cần GPU để chạy NB5.** Phần này chưa chạy được trên máy CPU-only.
-
-| # | Ticket (rút gọn) | Nhãn đúng | (b) prompt | (c) fine-tune | Nhận xét |
-|---|---|---|---|---|---|
-| 1 | _chưa đo_ | | | | ✅ FT thắng |
-| 2 | _chưa đo_ | | | | ✅ FT thắng |
-| 3 | _chưa đo_ | | | | ❌ **FT thua** |
-| 4 | _chưa đo_ | | | | ❌ **FT thua** |
-| 5 | _chưa đo_ | | | | |
-
-Có mẫu chung nào ở các ca FT thua không?
-
-_Chưa phân tích được — cần kết quả từ NB5._
-
----
+Các ca FT thua đều có cụm “Khi nào tiện”: nhãn đúng là urgency `thap`, nhưng model dự đoán `trung_binh`. Intent, product và sentiment vẫn đúng nên score là 0.75.
 
 ## 7. Kết luận & điều tôi học được
 
-**Kết luận (≥150 từ).** Bạn có nên deploy bản fine-tune này không, và vì sao? Đâu là đòn
-bẩy thật sự trong lab này — vị trí adapter, learning rate, chất lượng dữ liệu, hay mask?
+Tôi không deploy fine-tune này. Nó tăng target từ 0.765 của prompt tối ưu lên 0.975, nhưng giảm regression 0.2133 và FAILED gate. Với CSKH, lợi ích ở miền mới không bù cho suy giảm năng lực tổng quát nếu không có replay hoặc routing. Kết quả cho thấy rank không phải đòn bẩy duy nhất: với ngân sách gần bằng nhau, text-linear thắng attention-only trên target dù attention-only có train loss thấp hơn. Learning rate có tác động rất lớn; giảm 10 lần đã làm target và format về 0. QLoRA tiết kiệm 41% VRAM nhưng đổi bằng chất lượng và latency. Mask đúng là điều kiện nền tảng: assistant-only xác nhận prompt bị mask và JSON đáp án thực sự được supervised. Nếu có thêm thời gian, tôi sẽ thêm replay data và giảm epoch/LR, sau đó chạy lại cùng 50 target + 15 regression thay vì chọn checkpoint theo train loss.
 
-Lab Day 21 này dạy một bài học quan trọng: **fine-tuning không phải là câu trả lời mặc định cho mọi bài toán**. Điểm mấu chốt nằm ở việc thiết kế một phép so sánh công bằng — đo baseline (b) với prompt đã tối ưu **trước khi** train, rồi mới quyết định xem fine-tune có thật sự thắng hay không. Từ NB1, tôi đã học được rằng loss mask và chat template quyết định kết quả nhiều hơn mọi biến thể LoRA cộng lại. Mask đúng nghĩa là chỉ tính loss trên câu trả lời, không tính trên câu hỏi — nếu tính cả prompt, model sẽ học cách viết lại câu hỏi thay vì trả lời. Về đòn bẩy thật sự, deck §10 chỉ ra rằng vị trí gắn adapter (text-linear vs attn-only) và learning rate (10x full-FT) quan trọng hơn rank. Rank chỉ là "năng lực so với lượng thông tin trong dữ liệu" — với 250 mẫu, rank cao không tự động tốt hơn. Cuối cùng, việc phát hiện ra rằng một fine-tune có thể thua baseline (b) là một kết quả hợp lệ — nó cho thấy prompt engineering đôi khi đủ tốt và không cần fine-tune. Quyết định deploy phụ thuộc vào kết quả NB5: nếu fine-tune thắng (b) trên target mà không tụt regression, thì deploy; nếu không, giữ nguyên base + prompt tối ưu.
+**Ba điều tôi học được:**
 
-**Ba điều tôi học được** (cụ thể, không generic):
-1. **Loss mask là nền tảng của mọi thứ.** Nếu mask sai (tính loss cả prompt), model sẽ học viết lại câu hỏi thay vì trả lời — và không có lỗi nào báo hiệu. NB1 bắt tôi phải **đọc** đoạn được tính loss, không chỉ tin vào cờ của thư viện.
-2. **So sánh công bằng cần khớp ngân sách tham số, không khớp rank.** So `q,v @ r=16` với `all-linear @ r=16` là so ngân sách, không phải so vị trí. `matched_rank()` giải ra rank đưa attention-only về đúng ngân sách của `correct` — chỉ khi đó biến duy nhất còn lại mới là vị trí.
-3. **LR thang full-FT không chuyển được sang LoRA.** LoRA cần LR cao hơn ~10x (1e-4 thay vì 1e-5). Nếu dùng sai thang, loss gần như phẳng từ step 0 — và nếu chỉ nhìn loss mà không biết LR, bạn sẽ kết luận sai rằng "LoRA không học được".
+1. Train loss có thể xếp hạng sai deployment quality: 0.5371 của `attn_only` tốt hơn 0.6250 của `correct`, nhưng target lại thấp hơn.
+2. So sánh placement phải khớp ngân sách: 32,456,704 vs 32,464,896 trainable params là một contrast công bằng.
+3. Regression gate bảo vệ khỏi kết luận hấp tấp: target tăng 0.210 nhưng regression giảm 0.2133, nên không deploy.
 
-**Nếu có thêm 2 giờ nữa, tôi sẽ thử:**
-Chạy NB2-NB5 trên Colab Free T4 để có số đo thực tế, đặc biệt là so sánh thứ tự xếp hạng giữa `final_loss` (NB4) và điểm target (NB5 §4) — nếu hai thứ tự khác nhau, đó là bằng chứng trực tiếp cho Lỗi #3 mà lab cảnh báo.
-
----
-
-## Phụ lục — thưởng đã làm
+## Phụ lục — thưởng
 
 - [ ] B1 NB6 merge + hot-swap
-- [ ] B2 dataset miền riêng (`data/CUSTOM_DATASET.md`)
-- [ ] B3 reasoning-trace collapse (hai `MASK_MODE`, kèm `valid_trace_rate`)
+- [ ] B2 dataset miền riêng
+- [ ] B3 reasoning-trace collapse
 - [ ] B4 quét rank có kiểm soát
-- [ ] B5 HuggingFace Hub — link:
+- [ ] B5 HuggingFace Hub
